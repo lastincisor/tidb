@@ -66,7 +66,7 @@ const (
 	References_priv,Alter_priv,Execute_priv,Index_priv,Create_view_priv,Show_view_priv,
 	Create_role_priv,Drop_role_priv,Create_tmp_table_priv,Lock_tables_priv,Create_routine_priv,
 	Alter_routine_priv,Event_priv,Shutdown_priv,Reload_priv,File_priv,Config_priv,Repl_client_priv,Repl_slave_priv,
-	Account_locked,Plugin,Token_issuer,User_attributes FROM mysql.user`
+	Account_locked,Plugin,Token_issuer,User_attributes,password_expired,password_last_changed,password_lifetime,failed_login_attempts,password_lock_time FROM mysql.user`
 	sqlLoadGlobalGrantsTable = `SELECT HIGH_PRIORITY Host,User,Priv,With_Grant_Option FROM mysql.global_grants`
 )
 
@@ -102,6 +102,11 @@ type UserRecord struct {
 	AuthPlugin           string
 	AuthTokenIssuer      string
 	Email                string
+	PasswordExpired      bool
+	PasswordLastChanged  time.Time
+	PasswordLifetime     int64
+	FailedLoginAttempts  int64
+	PasswordLockTime     int64
 }
 
 // NewUserRecord return a UserRecord, only use for unit test.
@@ -650,6 +655,22 @@ func (p *MySQLPrivilege) decodeUserTableRow(row chunk.Row, fs []*ast.ResultField
 			if row.GetEnum(i).String() == "Y" {
 				value.AccountLocked = true
 			}
+		case f.ColumnAsName.L == "password_expired":
+			if row.GetEnum(i).String() == "Y" {
+				value.PasswordExpired = true
+			}
+		case f.ColumnAsName.L == "password_last_changed":
+			var err error
+			value.PasswordLastChanged, err = row.GetTime(i).GoTime(time.Local)
+			if err != nil {
+				return errors.Trace(err)
+			}
+		case f.ColumnAsName.L == "password_lifetime":
+			value.PasswordLifetime = row.GetInt64(i)
+		case f.ColumnAsName.L == "failed_login_attempts":
+			value.FailedLoginAttempts = row.GetInt64(i)
+		case f.ColumnAsName.L == "password_lock_time":
+			value.PasswordLockTime = row.GetInt64(i)
 		case f.ColumnAsName.L == "plugin":
 			if row.GetString(i) != "" {
 				value.AuthPlugin = row.GetString(i)

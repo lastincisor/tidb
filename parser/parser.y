@@ -763,6 +763,8 @@ import (
 	reset                      "RESET"
 	regions                    "REGIONS"
 	region                     "REGION"
+	failedLoginAttempts        "FAILED_LOGIN_ATTEMPTS"
+	passwordLockTime           "PASSWORD_LOCK_TIME"
 	builtinBitAnd
 	builtinBitOr
 	builtinBitXor
@@ -6383,7 +6385,7 @@ UnReservedKeyword:
 |	"CLUSTERED"
 |	"NONCLUSTERED"
 |	"PRESERVE"
-|	"TOKEN_ISSUER"
+|	"TOKEN_ISSUER" "FAILED_LOGIN_ATTEMPTS" "PASSWORD_LOCK_TIME"
 
 TiDBKeyword:
 	"ADMIN"
@@ -12873,6 +12875,36 @@ CommentOrAttributeOption:
 |	"ATTRIBUTE" stringLit
 	{
 		$$ = &ast.CommentOrAttributeOption{Type: ast.UserAttributeType, Value: $2}
+	} PasswordFailedOption
+	{
+		$$ = $1
+	}
+
+PasswordFailedOption:
+	{
+		$$ = nil
+	} "FAILED_LOGIN_ATTEMPTS" Int64Num "PASSWORD_LOCK_TIME" Int64Num
+	{
+		$$ = &ast.PasswordFailedOption{
+			Type:  ast.FailedLoginAttempts,
+			Count: $3.(int64),
+		}
+		yylex.AppendError(yylex.Errorf("TiDB does not support FAILED_LOGIN_ATTEMPTS EXPIRE, they would be parsed but ignored."))
+		parser.lastErrorAsWarn()
+		$$ = &ast.PasswordFailedOption{
+			Type:  ast.PasswordLockTime,
+			Count: $3.(int64),
+		}
+		yylex.AppendError(yylex.Errorf("TiDB does not support PASSWORD_LOCK_TIME EXPIRE, they would be parsed but ignored."))
+		parser.lastErrorAsWarn()
+	} "FAILED_LOGIN_ATTEMPTS" Int64Num "PASSWORD_LOCK_TIME" "UNBOUNDED"
+	{
+		$$ = &ast.PasswordFailedOption{
+			Type:  ast.FailedLoginAttempts,
+			Count: $3.(int64),
+		}
+		yylex.AppendError(yylex.Errorf("TiDB does not support FAILED_LOGIN_ATTEMPTS EXPIRE, they would be parsed but ignored."))
+		parser.lastErrorAsWarn()
 	}
 
 PasswordOrLockOptions:

@@ -99,6 +99,11 @@ const (
 		Create_Tablespace_Priv  ENUM('N','Y') NOT NULL DEFAULT 'N',
 		User_attributes			json,
 		Token_issuer			VARCHAR(255),
+    	password_expired        ENUM('N','Y') NOT NULL DEFAULT 'N',
+        password_last_changed   TIMESTAMP(3),
+        password_lifetime       BIGINT(64) UNSIGNED NOT NULL DEFAULT 0,
+    	failed_login_attempts   BIGINT(64) UNSIGNED NOT NULL DEFAULT 0,
+    	password_lock_time      BIGINT(64) UNSIGNED NOT NULL DEFAULT 0,
 		PRIMARY KEY (Host, User));`
 	// CreateGlobalPrivTable is the SQL statement creates Global scope privilege table in system db.
 	CreateGlobalPrivTable = "CREATE TABLE IF NOT EXISTS mysql.global_priv (" +
@@ -644,6 +649,8 @@ const (
 	version99 = 99
 	// version100 converts server-memory-quota to a sysvar
 	version100 = 100
+	// version98 add a column `password_expired` `password_last_changed` `password_lifetime` to `mysql.user`
+	version101 = 101
 )
 
 // currentBootstrapVersion is defined as a variable, so we can modify its value for testing.
@@ -753,6 +760,7 @@ var (
 		upgradeToVer97,
 		upgradeToVer98,
 		upgradeToVer100,
+		upgradeToVer101,
 	}
 )
 
@@ -2024,6 +2032,17 @@ func upgradeToVer100(s Session, ver int64) {
 	}
 	valStr := strconv.Itoa(int(config.GetGlobalConfig().Performance.ServerMemoryQuota))
 	importConfigOption(s, "performance.server-memory-quota", variable.TiDBServerMemoryLimit, valStr)
+}
+
+func upgradeToVer101(s Session, ver int64) {
+	if ver >= version101 {
+		return
+	}
+	doReentrantDDL(s, "ALTER TABLE mysql.user ADD COLUMN IF NOT EXISTS `password_expired` ENUM('N','Y') CHARACTER SET utf8 NOT NULL DEFAULT 'N'")
+	doReentrantDDL(s, "ALTER TABLE mysql.user ADD COLUMN IF NOT EXISTS `password_last_changed` TIMESTAMP(3)")
+	doReentrantDDL(s, "ALTER TABLE mysql.user ADD COLUMN IF NOT EXISTS `password_lifetime` BIGINT(64) NOT NULL DEFAULT 0")
+	doReentrantDDL(s, "ALTER TABLE mysql.user ADD COLUMN IF NOT EXISTS `failed_login_attempts` BIGINT(64) NOT NULL DEFAULT 0")
+	doReentrantDDL(s, "ALTER TABLE mysql.user ADD COLUMN IF NOT EXISTS `password_lock_time` BIGINT(64) NOT NULL DEFAULT 0")
 }
 
 func writeOOMAction(s Session) {
