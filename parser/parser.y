@@ -12773,6 +12773,19 @@ RequireListElement:
 		}
 	}
 
+CommentOrAttributeOption:
+    	{
+    		$$ = nil
+    	}
+    |	"COMMENT" stringLit
+    	{
+    		$$ = &ast.CommentOrAttributeOption{Type: ast.UserCommentType, Value: $2}
+    	}
+    |	"ATTRIBUTE" stringLit
+    	{
+    		$$ = &ast.CommentOrAttributeOption{Type: ast.UserAttributeType, Value: $2}
+    	}
+
 PasswordOrLockOptions:
 	{
 		$$ = []*ast.PasswordOrLockOption{}
