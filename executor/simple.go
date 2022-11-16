@@ -20,11 +20,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/ngaut/pools"
 	"github.com/pingcap/errors"
@@ -53,11 +51,11 @@ import (
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/hack"
 	"github.com/pingcap/tidb/util/logutil"
+	pwdValidator "github.com/pingcap/tidb/util/password-validation"
 	"github.com/pingcap/tidb/util/sem"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/pingcap/tidb/util/timeutil"
 	"github.com/pingcap/tidb/util/tls"
-	validatePwd "github.com/pingcap/tidb/util/validate-password"
 	"github.com/pingcap/tipb/go-tipb"
 	tikvutil "github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
@@ -786,112 +784,24 @@ func (e *SimpleExec) executeRollback(s *ast.RollbackStmt) error {
 	return nil
 }
 
-func (e *SimpleExec) authUsingCleartextPwd(authOpt *ast.AuthOption) bool {
+func (e *SimpleExec) authUsingCleartextPwd(authOpt *ast.AuthOption, authPlugin string) bool {
 	if authOpt == nil || !authOpt.ByAuthString {
 		return false
 	}
-	if authOpt.AuthString == mysql.AuthNativePassword ||
-		authOpt.AuthString == mysql.AuthTiDBSM3Password ||
-		authOpt.AuthString == mysql.AuthCachingSha2Password {
+	if authPlugin == mysql.AuthNativePassword ||
+		authPlugin == mysql.AuthTiDBSM3Password ||
+		authPlugin == mysql.AuthCachingSha2Password {
 		return true
 	}
 	return false
 }
 
-func (e *SimpleExec) validateUserNameInPassword(pwd, username string) error {
-	pwdBytes := hack.Slice(pwd)
-	usernameBytes := hack.Slice(username)
-	userNameLen := len(usernameBytes)
-	if userNameLen == 0 {
-		return nil
-	}
-	if bytes.Contains(pwdBytes, usernameBytes) {
-		return ErrNotValidPassword.GenWithStack("Password Contains User Name")
-	}
-	usernameReversedBytes := make([]byte, userNameLen)
-	for i := range usernameBytes {
-		usernameReversedBytes[i] = usernameBytes[userNameLen-1-i]
-	}
-	if bytes.Contains(pwdBytes, usernameReversedBytes) {
-		return ErrNotValidPassword.GenWithStack("Password Contains Reversed User Name")
-	}
-	return nil
-}
-
-func (e *SimpleExec) validatePassword(pwd string) error {
-	if validatePwdEnable, err := e.ctx.GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.ValidatePasswordEnable); err != nil {
-		return err
-	} else if !variable.TiDBOptOn(validatePwdEnable) {
-		return nil
-	}
-
-	runes := []rune(pwd)
-	// LOW
-	if validateLengthStr, err := e.ctx.GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.ValidatePasswordLength); err != nil {
-		return err
-	} else if validateLength, err := strconv.ParseInt(validateLengthStr, 10, 64); err != nil {
-		return err
-	} else if (int64)(len(runes)) < validateLength {
-		return ErrNotValidPassword.GenWithStack("Require Password Length: %d", validateLength)
-	}
-	validatePolicy, err := e.ctx.GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.ValidatePasswordPolicy)
+func (e *SimpleExec) enableValidatePassword() bool {
+	validatePwdEnable, err := e.ctx.GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.ValidatePasswordEnable)
 	if err != nil {
-		return err
+		return false
 	}
-	if err = e.validateUserNameInPassword(pwd, e.ctx.GetSessionVars().User.AuthUsername); err != nil {
-		return err
-	} else if err = e.validateUserNameInPassword(pwd, e.ctx.GetSessionVars().User.Username); err != nil {
-		return err
-	}
-	if validatePolicy == "LOW" {
-		return nil
-	}
-
-	// MEDIUM
-	var lowerCaseCount, upperCaseCount, numberCount, specialCharCount int64
-	for _, r := range runes {
-		if unicode.IsUpper(r) {
-			upperCaseCount++
-		} else if unicode.IsLower(r) {
-			lowerCaseCount++
-		} else if unicode.IsDigit(r) {
-			numberCount++
-		} else {
-			specialCharCount++
-		}
-	}
-	if mixedCaseCountStr, err := e.ctx.GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.ValidatePasswordMixedCaseCount); err != nil {
-		return err
-	} else if mixedCaseCount, err := strconv.ParseInt(mixedCaseCountStr, 10, 64); err != nil {
-		return err
-	} else if lowerCaseCount < mixedCaseCount {
-		return ErrNotValidPassword.GenWithStack("Require Password Lowercase Count: %d", mixedCaseCount)
-	} else if upperCaseCount < mixedCaseCount {
-		return ErrNotValidPassword.GenWithStack("Require Password Uppercase Count: %d", mixedCaseCount)
-	}
-	if requireNumberCountStr, err := e.ctx.GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.ValidatePasswordNumberCount); err != nil {
-		return err
-	} else if requireNumberCount, err := strconv.ParseInt(requireNumberCountStr, 10, 64); err != nil {
-		return err
-	} else if numberCount < requireNumberCount {
-		return ErrNotValidPassword.GenWithStack("Require Password Digit Count: %d", requireNumberCount)
-	}
-	if requireSpecialCharCountStr, err := e.ctx.GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.ValidatePasswordSpecialCharCount); err != nil {
-		return err
-	} else if requireSpecialCharCount, err := strconv.ParseInt(requireSpecialCharCountStr, 10, 64); err != nil {
-		return err
-	} else if specialCharCount < requireSpecialCharCount {
-		return ErrNotValidPassword.GenWithStack("Require Password Non-alphanumeric Count: %d", requireSpecialCharCount)
-	}
-	if validatePolicy == "MEDIUM" {
-		return nil
-	}
-
-	// STRONG
-	if !validatePwd.ValidateDictionaryPassword(pwd) {
-		return ErrNotValidPassword.GenWithStack("Password contains word in the dictionary")
-	}
-	return nil
+	return variable.TiDBOptOn(validatePwdEnable)
 }
 
 func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStmt) error {
@@ -993,8 +903,12 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 			e.ctx.GetSessionVars().StmtCtx.AppendNote(err)
 			continue
 		}
-		if e.authUsingCleartextPwd(spec.AuthOpt) {
-			if err := e.validatePassword(spec.AuthOpt.AuthString); err != nil {
+		authPlugin := mysql.AuthNativePassword
+		if spec.AuthOpt != nil && spec.AuthOpt.AuthPlugin != "" {
+			authPlugin = spec.AuthOpt.AuthPlugin
+		}
+		if e.enableValidatePassword() && e.authUsingCleartextPwd(spec.AuthOpt, authPlugin) {
+			if err := pwdValidator.ValidatePassword(e.ctx.GetSessionVars(), spec.AuthOpt.AuthString); err != nil {
 				return err
 			}
 		}
@@ -1002,10 +916,6 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 
 		if !ok {
 			return errors.Trace(ErrPasswordFormat)
-		}
-		authPlugin := mysql.AuthNativePassword
-		if spec.AuthOpt != nil && spec.AuthOpt.AuthPlugin != "" {
-			authPlugin = spec.AuthOpt.AuthPlugin
 		}
 
 		switch authPlugin {
@@ -1205,11 +1115,11 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 		var fields []alterField
 		if spec.AuthOpt != nil {
 			if spec.AuthOpt.AuthPlugin == "" {
-				authplugin, err := e.userAuthPlugin(spec.User.Username, spec.User.Hostname)
+				curAuthplugin, err := e.userAuthPlugin(spec.User.Username, spec.User.Hostname)
 				if err != nil {
 					return err
 				}
-				spec.AuthOpt.AuthPlugin = authplugin
+				spec.AuthOpt.AuthPlugin = curAuthplugin
 			}
 			switch spec.AuthOpt.AuthPlugin {
 			case mysql.AuthNativePassword, mysql.AuthCachingSha2Password, mysql.AuthTiDBSM3Password, mysql.AuthSocket, "":
@@ -1221,8 +1131,8 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 			default:
 				return ErrPluginIsNotLoaded.GenWithStackByArgs(spec.AuthOpt.AuthPlugin)
 			}
-			if e.authUsingCleartextPwd(spec.AuthOpt) {
-				if err := e.validatePassword(spec.AuthOpt.AuthString); err != nil {
+			if e.enableValidatePassword() && e.authUsingCleartextPwd(spec.AuthOpt, spec.AuthOpt.AuthPlugin) {
+				if err := pwdValidator.ValidatePassword(e.ctx.GetSessionVars(), spec.AuthOpt.AuthString); err != nil {
 					return err
 				}
 			}
@@ -1746,8 +1656,10 @@ func (e *SimpleExec) executeSetPwd(ctx context.Context, s *ast.SetPwdStmt) error
 	if err != nil {
 		return err
 	}
-	if err := e.validatePassword(s.Password); err != nil {
-		return err
+	if e.enableValidatePassword() {
+		if err := pwdValidator.ValidatePassword(e.ctx.GetSessionVars(), s.Password); err != nil {
+			return err
+		}
 	}
 	var pwd string
 	switch authplugin {
@@ -1922,14 +1834,24 @@ func (e *SimpleExec) executeAlterInstance(s *ast.AlterInstanceStmt) error {
 func (e *SimpleExec) executeDropStats(s *ast.DropStatsStmt) (err error) {
 	h := domain.GetDomain(e.ctx).StatsHandle()
 	var statsIDs []int64
+	// TODO: GLOBAL option will be deprecated. Also remove this condition when the syntax is removed
 	if s.IsGlobalStats {
-		statsIDs = []int64{s.Table.TableInfo.ID}
+		statsIDs = []int64{s.Tables[0].TableInfo.ID}
 	} else {
-		if statsIDs, _, err = core.GetPhysicalIDsAndPartitionNames(s.Table.TableInfo, s.PartitionNames); err != nil {
-			return err
-		}
 		if len(s.PartitionNames) == 0 {
-			statsIDs = append(statsIDs, s.Table.TableInfo.ID)
+			for _, table := range s.Tables {
+				partitionStatIds, _, err := core.GetPhysicalIDsAndPartitionNames(table.TableInfo, nil)
+				if err != nil {
+					return err
+				}
+				statsIDs = append(statsIDs, partitionStatIds...)
+				statsIDs = append(statsIDs, table.TableInfo.ID)
+			}
+		} else {
+			// TODO: drop stats for specific partition is deprecated. Also remove this condition when the syntax is removed
+			if statsIDs, _, err = core.GetPhysicalIDsAndPartitionNames(s.Tables[0].TableInfo, s.PartitionNames); err != nil {
+				return err
+			}
 		}
 	}
 	if err := h.DeleteTableStatsFromKV(statsIDs); err != nil {

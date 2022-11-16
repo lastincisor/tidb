@@ -15,18 +15,21 @@
 package expression
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/hack"
 	"github.com/stretchr/testify/require"
@@ -621,6 +624,57 @@ func TestUncompressLength(t *testing.T) {
 	}
 
 	fc := funcs[ast.UncompressedLength]
+	for _, test := range tests {
+		arg := types.NewDatum(test.in)
+		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{arg}))
+		require.NoErrorf(t, err, "%v", test)
+		out, err := evalBuiltinFunc(f, chunk.Row{})
+		require.NoErrorf(t, err, "%v", test)
+		require.Equalf(t, types.NewDatum(test.expect), out, "%v", test)
+	}
+}
+
+func TestValidatePasswordStrength(t *testing.T) {
+	ctx := createContext(t)
+	ctx.GetSessionVars().User = &auth.UserIdentity{Username: "testuser"}
+	tempDict, err := util.CreateTmpDictWithContent("tempDictionary.txt", []byte("1234\n"))
+	require.NoError(t, err)
+	globalVarsAccessor := variable.NewMockGlobalAccessor4Tests()
+	ctx.GetSessionVars().GlobalVarsAccessor = globalVarsAccessor
+	err = globalVarsAccessor.SetGlobalSysVar(context.Background(), variable.ValidatePasswordDictionaryFile, tempDict)
+	require.NoError(t, err)
+
+	tests := []struct {
+		in     interface{}
+		expect interface{}
+	}{
+		{nil, nil},
+		{"123", 0},
+		{"testuser123", 0},
+		{"resutset123", 0},
+		{"12345", 25},
+		{"12345678", 50},
+		{"!Abc12345678", 75},
+		{"!Abc87654321", 100},
+	}
+
+	fc := funcs[ast.ValidatePasswordStrength]
+	// disable password validation
+	for _, test := range tests {
+		arg := types.NewDatum(test.in)
+		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{arg}))
+		require.NoErrorf(t, err, "%v", test)
+		out, err := evalBuiltinFunc(f, chunk.Row{})
+		require.NoErrorf(t, err, "%v", test)
+		if test.expect == nil {
+			require.Equal(t, types.NewDatum(nil), out)
+		} else {
+			require.Equalf(t, types.NewDatum(0), out, "%v", test)
+		}
+	}
+	// enable password validation
+	err = globalVarsAccessor.SetGlobalSysVar(context.Background(), variable.ValidatePasswordEnable, "ON")
+	require.NoError(t, err)
 	for _, test := range tests {
 		arg := types.NewDatum(test.in)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{arg}))

@@ -122,3 +122,83 @@ func TestUserAttributes(t *testing.T) {
 		testkit.Rows("root % <nil>", "testuser % {\"comment\": \"1234\"}", "testuser1 % {\"age\": 20, \"name\": \"Tom\"}", "testuser2 % <nil>"))
 	tk.MustGetErrCode(`SELECT user, host, user_attributes FROM mysql.user ORDER BY user`, mysql.ErrTableaccessDenied)
 }
+
+func TestValidatePassword(t *testing.T) {
+	// Some test cases come from mysql-server/mysql-test:
+	//  t/validate_password_component.test
+	//  t/validate_password_component_check_user.test
+
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
+
+	authPlugins := []string{mysql.AuthNativePassword, mysql.AuthCachingSha2Password, mysql.AuthTiDBSM3Password}
+	dictFile, err := util.CreateTmpDictWithContent("3.dict", []byte("1234\n5678"))
+	require.NoError(t, err)
+	tk.MustQuery("SELECT @@global.validate_password.enable").Check(testkit.Rows("0"))
+	tk.MustExec("SET GLOBAL validate_password.enable = 1")
+	tk.MustQuery("SELECT @@global.validate_password.enable").Check(testkit.Rows("1"))
+
+	for _, authPlugin := range authPlugins {
+		tk.MustExec("DROP USER IF EXISTS testuser")
+		tk.MustExec(fmt.Sprintf("CREATE USER testuser IDENTIFIED WITH %s BY '!Abc12345678'", authPlugin))
+
+		tk.MustExec("SET GLOBAL validate_password.policy = 'LOW'")
+		// check user name
+		tk.MustQuery("SELECT @@global.validate_password.check_user_name").Check(testkit.Rows("1"))
+		tk.MustContainErrMsg("ALTER USER testuser IDENTIFIED BY '!Abcdroot1234'", "Password Contains User Name")
+		tk.MustContainErrMsg("ALTER USER testuser IDENTIFIED BY '!Abcdtoor1234'", "Password Contains Reversed User Name")
+		tk.MustExec("SET PASSWORD FOR 'testuser' = 'testuser'") // password the same as the user name, but run by root
+		tk.MustExec("ALTER USER testuser IDENTIFIED BY 'testuser'")
+		tk.MustExec("SET GLOBAL validate_password.check_user_name = 0")
+		tk.MustExec("ALTER USER testuser IDENTIFIED BY '!Abcdroot1234'")
+		tk.MustExec("ALTER USER testuser IDENTIFIED BY '!Abcdtoor1234'")
+		tk.MustExec("SET GLOBAL validate_password.check_user_name = 1")
+
+		// LOW: Length
+		tk.MustQuery("SELECT @@global.validate_password.length").Check(testkit.Rows("8"))
+		tk.MustContainErrMsg("ALTER USER testuser IDENTIFIED BY '1234567'", "Require Password Length: 8")
+		tk.MustExec("SET GLOBAL validate_password.length = 12")
+		tk.MustContainErrMsg("ALTER USER testuser IDENTIFIED BY '!Abcdefg123'", "Require Password Length: 12")
+		tk.MustExec("ALTER USER testuser IDENTIFIED BY '!Abcdefg1234'")
+		tk.MustExec("SET GLOBAL validate_password.length = 8")
+
+		// MEDIUM: Length; numeric, lowercase/uppercase, and special characters
+		tk.MustExec("SET GLOBAL validate_password.policy = 'MEDIUM'")
+		tk.MustExec("ALTER USER testuser IDENTIFIED BY '!Abc1234567'")
+		tk.MustContainErrMsg("ALTER USER testuser IDENTIFIED BY '!ABC1234567'", "Require Password Lowercase Count: 1")
+		tk.MustContainErrMsg("ALTER USER testuser IDENTIFIED BY '!abc1234567'", "Require Password Uppercase Count: 1")
+		tk.MustContainErrMsg("ALTER USER testuser IDENTIFIED BY '!ABCDabcd'", "Require Password Digit Count: 1")
+		tk.MustContainErrMsg("ALTER USER testuser IDENTIFIED BY 'Abc1234567'", "Require Password Non-alphanumeric Count: 1")
+		tk.MustExec("SET GLOBAL validate_password.special_char_count = 0")
+		tk.MustExec("ALTER USER testuser IDENTIFIED BY 'Abc1234567'")
+		tk.MustExec("SET GLOBAL validate_password.special_char_count = 1")
+		tk.MustContainErrMsg("SET GLOBAL validate_password.length = 3", "Variable 'validate_password.length' can't be set to the value of '3'")
+
+		// STRONG: Length; numeric, lowercase/uppercase, and special characters; dictionary file
+		tk.MustExec("SET GLOBAL validate_password.policy = 'STRONG'")
+		tk.MustExec("ALTER USER testuser IDENTIFIED BY '!Abc1234567'")
+		tk.MustExec(fmt.Sprintf("SET GLOBAL validate_password.dictionary_file = '%s'", dictFile))
+		tk.MustExec("ALTER USER testuser IDENTIFIED BY '!Abc123567'")
+		tk.MustExec("ALTER USER testuser IDENTIFIED BY '!Abc43218765'")
+		tk.MustContainErrMsg("ALTER USER testuser IDENTIFIED BY '!Abc1234567'", "Password contains word in the dictionary")
+		tk.MustExec("SET GLOBAL validate_password.dictionary_file = ''")
+		tk.MustExec("ALTER USER testuser IDENTIFIED BY '!Abc1234567'")
+
+		// "IDENTIFIED AS 'xxx'" is not affected by validation
+		tk.MustExec(fmt.Sprintf("ALTER USER testuser IDENTIFIED WITH '%s' AS ''", authPlugin))
+	}
+
+	// if the username is '', all password can pass the check_user_name
+	tk.MustExec("CREATE USER ''@'localhost'")
+	tk.MustExec("GRANT ALL PRIVILEGES ON mysql.* TO ''@'localhost';")
+	subtk := testkit.NewTestKit(t, store)
+	require.NoError(t, subtk.Session().Auth(&auth.UserIdentity{Hostname: "localhost"}, nil, nil))
+	subtk.MustQuery("SELECT user(), current_user()").Check(testkit.Rows("@localhost @localhost"))
+	subtk.MustQuery("SELECT @@global.validate_password.check_user_name").Check(testkit.Rows("1"))
+	subtk.MustQuery("SELECT @@global.validate_password.enable").Check(testkit.Rows("1"))
+	subtk.MustExec("ALTER USER ''@'localhost' IDENTIFIED BY ''")
+	subtk.MustExec("ALTER USER ''@'localhost' IDENTIFIED BY 'abcd'")
+
+	tk.MustExec("SET GLOBAL validate_password.enable = 1")
+}
