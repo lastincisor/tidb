@@ -922,23 +922,31 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 	}
 
 	lockAccount := "N"
+	var userAttributes any = nil
 	if length := len(s.PasswordOrLockOptions); length > 0 {
 		// If "ACCOUNT LOCK" or "ACCOUNT UNLOCK" appears many times,
 		// the last declaration takes effect.
+		var failedLoginAttempts any = nil
+		var passwordLockTimeDays any = nil
 		for i := length - 1; i >= 0; i-- {
 			if s.PasswordOrLockOptions[i].Type == ast.Lock {
 				lockAccount = "Y"
 				break
 			} else if s.PasswordOrLockOptions[i].Type == ast.Unlock {
 				break
+			} else if s.PasswordOrLockOptions[i].Type == ast.FailedLoginAttempts {
+				failedLoginAttempts = fmt.Sprintf("\"failed_login_attempts\": \"%s\"", s.PasswordOrLockOptions[i].Count)
+				break
+			} else if s.PasswordOrLockOptions[i].Type == ast.PasswordLockTime {
+				passwordLockTimeDays = fmt.Sprintf("\"password_lock_time_days\": \"%s\"", s.PasswordOrLockOptions[i].Count)
+				break
 			}
 		}
+		userAttributes = fmt.Sprintf("{\"Password_locking\": {%s,%s}}", failedLoginAttempts, passwordLockTimeDays)
 	}
 	if s.IsCreateRole {
 		lockAccount = "Y"
 	}
-
-	var userAttributes any = nil
 	if s.CommentOrAttributeOption != nil {
 		if s.CommentOrAttributeOption.Type == ast.UserCommentType {
 			userAttributes = fmt.Sprintf("{\"metadata\": {\"comment\": \"%s\"}}", s.CommentOrAttributeOption.Value)
@@ -1082,9 +1090,12 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 	}
 
 	lockAccount := ""
+	userAttributes := ""
 	if len(s.PasswordOrLockOptions) > 0 {
 		// If "ACCOUNT LOCK" or "ACCOUNT UNLOCK" appears many times,
 		// the last declaration takes effect.
+		var failedLoginAttempts any = nil
+		var passwordLockTimeDays any = nil
 		for i := len(s.PasswordOrLockOptions) - 1; i >= 0; i-- {
 			if s.PasswordOrLockOptions[i].Type == ast.Lock {
 				lockAccount = "Y"
@@ -1092,8 +1103,15 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 			} else if s.PasswordOrLockOptions[i].Type == ast.Unlock {
 				lockAccount = "N"
 				break
+			} else if s.PasswordOrLockOptions[i].Type == ast.FailedLoginAttempts {
+				failedLoginAttempts = fmt.Sprintf("\"failed_login_attempts\": \"%s\"", s.PasswordOrLockOptions[i].Count)
+				break
+			} else if s.PasswordOrLockOptions[i].Type == ast.PasswordLockTime {
+				passwordLockTimeDays = fmt.Sprintf("\"password_lock_time_days\": \"%s\"", s.PasswordOrLockOptions[i].Count)
+				break
 			}
 		}
+		userAttributes = fmt.Sprintf("{\"Password_locking\": {%s,%s}}", failedLoginAttempts, passwordLockTimeDays)
 	}
 
 	privData, err := tlsOption2GlobalPriv(s.AuthTokenOrTLSOptions)
@@ -1220,6 +1238,10 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 
 		if len(lockAccount) != 0 {
 			fields = append(fields, alterField{"account_locked=%?", lockAccount})
+		}
+
+		if len(userAttributes) != 0 {
+			fields = append(fields, alterField{"user_attributes=json_merge_patch(user_attributes, %?)", userAttributes})
 		}
 
 		if s.CommentOrAttributeOption != nil {

@@ -2618,6 +2618,7 @@ func (s *session) Auth(user *auth.UserIdentity, authentication, salt []byte) err
 		return privileges.ErrAccessDenied.FastGenByArgs(user.Username, user.Hostname, hasPassword)
 	}
 	if err = pm.ConnectionVerification(user, authUser.Username, authUser.Hostname, authentication, salt, s.sessionVars.TLSConnectionState); err != nil {
+		privileges.NewHandle().Get().FailedLogin(s, user.Username, user.Hostname)
 		return err
 	}
 	user.AuthUsername = authUser.Username

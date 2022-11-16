@@ -1495,11 +1495,12 @@ const (
 	PasswordExpireInterval
 	Lock
 	Unlock
+	FailedLoginAttempts
+	PasswordLockTime
+	PasswordLockTimeDefault
 
 	UserCommentType
 	UserAttributeType
-	FailedLoginAttempts
-	PasswordLockTime
 )
 
 type PasswordOrLockOption struct {
@@ -1540,12 +1541,6 @@ func (c *CommentOrAttributeOption) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteString(c.Value)
 	} else if c.Type == UserAttributeType {
 		ctx.WriteKeyWord(" ATTRIBUTE ")
-		ctx.WriteString(c.Value)
-	} else if c.Type == FailedLoginAttempts {
-		ctx.WriteKeyWord(" FAILED_LOGIN_ATTEMPTS ")
-		ctx.WriteString(c.Value)
-	} else if c.Type == PasswordLockTime {
-		ctx.WriteKeyWord(" PASSWORD_LOCK_TIME ")
 		ctx.WriteString(c.Value)
 	}
 	return nil

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -66,7 +67,7 @@ const (
 	References_priv,Alter_priv,Execute_priv,Index_priv,Create_view_priv,Show_view_priv,
 	Create_role_priv,Drop_role_priv,Create_tmp_table_priv,Lock_tables_priv,Create_routine_priv,
 	Alter_routine_priv,Event_priv,Shutdown_priv,Reload_priv,File_priv,Config_priv,Repl_client_priv,Repl_slave_priv,
-	Account_locked,Plugin,Token_issuer,User_attributes,password_expired,password_last_changed,password_lifetime,failed_login_attempts,password_lock_time FROM mysql.user`
+	Account_locked,Plugin,Token_issuer,User_attributes,password_expired,password_last_changed,password_lifetime FROM mysql.user`
 	sqlLoadGlobalGrantsTable = `SELECT HIGH_PRIORITY Host,User,Priv,With_Grant_Option FROM mysql.global_grants`
 )
 
@@ -237,6 +238,12 @@ type roleGraphEdgesTable struct {
 	roleList map[string]*auth.RoleIdentity
 }
 
+type failedLoginRecord struct {
+	Host        string // max length 60, primary key
+	User        string // max length 32, primary key
+	failedCount int64
+}
+
 // Find method is used to find role from table
 func (g roleGraphEdgesTable) Find(user, host string) bool {
 	if host == "" {
@@ -266,6 +273,7 @@ type MySQLPrivilege struct {
 	// non-full privileges (i.e. user.db entries).
 	User          []UserRecord
 	UserMap       map[string][]UserRecord // Accelerate User searching
+	UserLoginMap  map[string][]failedLoginRecord
 	Global        map[string][]globalPrivRecord
 	Dynamic       map[string][]dynamicPrivRecord
 	DB            []dbRecord
@@ -388,6 +396,62 @@ func (p *MySQLPrivilege) LoadAll(ctx sessionctx.Context) error {
 		logutil.BgLogger().Warn("mysql.role_edges missing")
 	}
 	return nil
+}
+
+func (p *MySQLPrivilege) FailedLogin(sctx sessionctx.Context, user string, host string) bool {
+	failLoginRecords, exists := p.UserLoginMap[user]
+	if exists {
+		records, userExists := p.UserMap[user]
+		var userFailedLoginAttempts int64
+		var passwordLockTime int64
+		if userExists {
+			for i := 0; i < len(records); i++ {
+				record := &records[i]
+				if record.Host == host { // exact match
+					userFailedLoginAttempts = record.FailedLoginAttempts
+					passwordLockTime = record.PasswordLockTime
+				}
+			}
+		}
+		var wg sync.WaitGroup
+		for i := 0; i < len(failLoginRecords); i++ {
+			record := &failLoginRecords[i]
+			if record.Host == host { // exact match
+				if userFailedLoginAttempts > record.failedCount {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						atomic.AddInt64(&record.failedCount, 1)
+						record.failedCount = atomic.LoadInt64(&record.failedCount)
+					}()
+				}
+				return false
+			} else {
+				ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnPrivilege)
+				rs, err := sctx.(sqlexec.SQLExecutor).ExecuteInternal(ctx, "ALTER USER '%?'@'%?' ACCOUNT LOCK", user, host)
+				if err != nil {
+					return false
+				}
+				defer terror.Call(rs.Close)
+				passwordLockTimeInt := int(passwordLockTime)
+				day := passwordLockTimeInt * 24 * 60 * 60
+				for {
+					select {
+					case <-time.Tick(time.Duration(day) * time.Second):
+						unLockRs, unLockErr := sctx.(sqlexec.SQLExecutor).ExecuteInternal(ctx, "ALTER USER '%?'@'%?' ACCOUNT UNLOCK", user, host)
+						if unLockErr != nil {
+						}
+						defer terror.Call(unLockRs.Close)
+					case <-time.After(7 * time.Second):
+						fmt.Println("5 second over, timeover", time.Now().Second())
+					}
+				}
+				return true
+			}
+		}
+		wg.Wait()
+	}
+	return false
 }
 
 func noSuchTable(err error) bool {
@@ -703,6 +767,20 @@ func (p *MySQLPrivilege) decodeUserTableRow(row chunk.Row, fs []*ast.ResultField
 					return err
 				}
 				value.Email = email
+			}
+			failedloginPathExpr, err := types.ParseJSONPathExpr("$.Password_locking.failed_login_attempts")
+			if err != nil {
+				return err
+			}
+			if failedLoginAttemptsBJ, found := bj.Extract([]types.JSONPathExpression{failedloginPathExpr}); found {
+				value.FailedLoginAttempts = failedLoginAttemptsBJ.GetInt64()
+			}
+			lockTimePathExpr, err := types.ParseJSONPathExpr("$.Password_locking.password_lock_time_days")
+			if err != nil {
+				return err
+			}
+			if lockTimeBJ, found := bj.Extract([]types.JSONPathExpression{lockTimePathExpr}); found {
+				value.PasswordLockTime = lockTimeBJ.GetInt64()
 			}
 		default:
 			value.assignUserOrHost(row, i, f)

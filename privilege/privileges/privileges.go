@@ -426,7 +426,6 @@ func (p *UserPrivileges) ConnectionVerification(user *auth.UserIdentity, authUse
 			return ErrAccessDenied.FastGenByArgs(user.Username, user.Hostname, hasPassword)
 		}
 	}
-
 	// Login a locked account is not allowed.
 	locked := record.AccountLocked
 	if locked {
