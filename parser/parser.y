@@ -5982,20 +5982,13 @@ IndexOption:
 
 /*
   See: https://github.com/mysql/mysql-server/blob/8.0/sql/sql_yacc.yy#L7179
-
   The syntax for defining an index is:
-
     ... INDEX [index_name] [USING|TYPE] <index_type> ...
-
   The problem is that whereas USING is a reserved word, TYPE is not. We can
   still handle it if an index name is supplied, i.e.:
-
     ... INDEX type TYPE <index_type> ...
-
   here the index's name is unmbiguously 'type', but for this:
-
     ... INDEX TYPE <index_type> ...
-
   it's impossible to know what this actually mean - is 'type' the name or the
   type? For this reason we accept the TYPE syntax only if a name is supplied.
 */
